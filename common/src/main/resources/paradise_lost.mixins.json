@@ -6,7 +6,6 @@
   "mixins": [
     "block.BlockMixin",
     "block.CropBlockMixin",
-    "block.FarmlandBlockMixin",
     "block.FlowerPotBlockMixin",
     "block.PowderSnowBlockMixin",
     "brain.ActivityInvoker",
@@ -29,8 +28,8 @@
     "item.PotionItemMixin",
     "portal.LiquidBlockPortalMixin",
     "server.PlayerManagerMixin",
-    "server.ServerPlayNetworkHandlerMixin",
     "server.ServerPlayerGameModeMixin",
+    "server.ServerPlayNetworkHandlerMixin",
     "server.ServerWorldMixin",
     "util.SlotAccessor",
     "world.gen.SurfaceBuilderMixin",

@@ -45,7 +45,6 @@ import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.DoubleHighBlockItem;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.component.ItemContainerContents;
-import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.level.ItemLike;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -165,18 +164,6 @@ public class BlockRegistry {
             }
             return instance;
         });
-    }
-
-    public static class ParadiseLostFarmlandBlock extends FarmBlock {
-        ParadiseLostFarmlandBlock(BlockBehaviour.Properties settings) {
-            super(settings);
-        }
-
-        public BlockState getStateForPlacement(BlockPlaceContext ctx) {
-            return !this.defaultBlockState().canSurvive(ctx.getLevel(), ctx.getClickedPos())
-                    ? DIRT.get().defaultBlockState()
-                    : super.getStateForPlacement(ctx);
-        }
     }
 
     public static class ParadiseLostPaneBlock extends IronBarsBlock {
