@@ -50,6 +50,24 @@ base {
     archivesName = "$modId-${project.name}-${getVersion("minecraft")}"
 }
 
+class DebugFlag(val property: String, val env: String, val jvmProperty: String)
+
+val debugFlags = listOf(
+    DebugFlag("debugMinecartFloat", "DEBUG_MINECART_FLOAT", "paradise_lost.debug.minecart_float"),
+    DebugFlag("debugMinecartRotation", "DEBUG_MINECART_ROTATION", "paradise_lost.debug.minecart_rotation")
+)
+val onCi = System.getenv("GITHUB_ACTIONS") != null
+extra["debugJvmArgs"] = debugFlags
+    .filter { flag ->
+        val fromEnv = System.getenv(flag.env)?.takeIf { it.isNotBlank() }
+        when {
+            fromEnv != null -> fromEnv.toBoolean()
+            onCi -> false
+            else -> providers.gradleProperty(flag.property).orNull.toBoolean()
+        }
+    }
+    .map { "-D${it.jvmProperty}=true" }
+
 checkstyle {
     sourceSets = emptyList()
 }
