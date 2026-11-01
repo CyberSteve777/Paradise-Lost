@@ -167,7 +167,7 @@ public abstract class AbstractMinecartEntityMixin extends VehicleEntity implemen
                 ci.cancel();
                 return;
             }
-            if (!this.level().isClientSide()) {
+            if (!this.level().isClientSide() && !MinecartFloatingHelper.isGhostSlopeBelow(cart, pos, state)) {
                 MinecartFloatingHelper.adaptFloatWhileGhosting(cart, state);
             }
             MinecartFloatingHelper.debugEvent(cart, "skipTrack",
@@ -281,6 +281,7 @@ public abstract class AbstractMinecartEntityMixin extends VehicleEntity implemen
         }
         this.setDeltaMovement(x, y, z);
 
+        Vec3 intended = this.getDeltaMovement();
         boolean noclip = MinecartFloatingHelper.shouldUseSlopeNoclip(cart)
                 || (this.paradiseLost$exitGrace > 0 && MinecartFloatingHelper.shouldUseExitGraceNoclip(cart));
         if (this.paradiseLost$exitGrace > 0) {
@@ -298,12 +299,14 @@ public abstract class AbstractMinecartEntityMixin extends VehicleEntity implemen
             this.move(MoverType.SELF, this.getDeltaMovement());
         }
 
-        // Hit solid with nothing to land on, level out and coast.
+        // Hit a floor, ceiling or wall with nothing to land on, level out and coast.
         if (!this.level().isClientSide()
-                && MinecartFloatingHelper.shouldLevelAgainstSolidBarrier(cart, this.onGround(), this.verticalCollision)) {
+                && MinecartFloatingHelper.shouldLevelAgainstSolidBarrier(cart, this.onGround(), this.verticalCollision,
+                this.horizontalCollision, intended)) {
             MinecartFloatingHelper.levelOpenAirFlight(cart);
             MinecartFloatingHelper.debugEvent(cart, "solidBarrier",
-                    "onGround=" + this.onGround() + " vertCol=" + this.verticalCollision);
+                    "onGround=" + this.onGround() + " vertCol=" + this.verticalCollision
+                            + " horCol=" + this.horizontalCollision);
         }
 
         if (tickFloatTime) {

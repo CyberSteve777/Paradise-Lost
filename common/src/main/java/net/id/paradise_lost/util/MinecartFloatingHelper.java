@@ -4,8 +4,8 @@ import com.mojang.datafixers.util.Pair;
 import net.id.paradise_lost.ModConstants;
 import net.id.paradise_lost.attachments.CommonDataAttachments;
 import net.id.paradise_lost.datafixer.MinecartFloatDataFix;
+import net.id.paradise_lost.debug.DebugFlags;
 import net.id.paradise_lost.entity.MinecartFloatPoseAccess;
-import net.id.paradise_lost.platform.Services;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Vec3i;
@@ -26,7 +26,6 @@ import java.util.Map;
 import java.util.WeakHashMap;
 
 public final class MinecartFloatingHelper {
-    public static final boolean DEBUG_LOG = Services.PLATFORM.isDevelopmentEnvironment() && System.getenv("GITHUB_ACTIONS") == null;
 
     private static final double FLOAT_SECONDS = 4.1;
     private static final double MOTION_EPSILON = 0.05D;
@@ -444,15 +443,21 @@ public final class MinecartFloatingHelper {
     private static final int IMMINENT_CEILING_BLOCKS = 3;
     private static final int CEILING_LOOKAHEAD_BLOCKS = 12;
 
+    /**
+     * Leaving a slope into open air keeps the slope (up or down) for at least the base grace, and for as long as the
+     * cart still has float time left, so the distance flown grows with the number of powered rails it passed. Running
+     * out of float, or hitting the ground or a ceiling, is what ends it.
+     */
     private static void armOpenAirClimbGrace(AbstractMinecart cart, int incline) {
-        if (incline <= 0) {
+        if (incline == 0) {
             return;
         }
-        int grace = OPEN_AIR_CLIMB_GRACE_TICKS;
-        int solidDist = distanceToSolidAbove(cart, CEILING_LOOKAHEAD_BLOCKS);
-        // A high ceiling (the test puts stone about 10 up) stretches the grace until it gets close.
-        if (solidDist > IMMINENT_CEILING_BLOCKS) {
-            grace = Math.max(grace, (solidDist - IMMINENT_CEILING_BLOCKS) * 10 + 20);
+        int grace = Math.max(OPEN_AIR_CLIMB_GRACE_TICKS, getFloatTime(cart));
+        if (incline > 0) {
+            int solidDist = distanceToSolidAbove(cart, CEILING_LOOKAHEAD_BLOCKS);
+            if (solidDist > IMMINENT_CEILING_BLOCKS) {
+                grace = Math.max(grace, (solidDist - IMMINENT_CEILING_BLOCKS) * 10 + 20);
+            }
         }
         ((MinecartFloatPoseAccess) cart).paradiseLost$setOpenAirClimbGrace(grace);
     }
@@ -1759,6 +1764,9 @@ public final class MinecartFloatingHelper {
             if (!(state.getBlock() instanceof BaseRailBlock rail)) {
                 continue;
             }
+            if (isGhostSlopeBelow(cart, at, state)) {
+                continue;
+            }
             RailShape shape = state.getValue(rail.getShapeProperty());
             double height = cart.getY() - at.getY();
             double limit = shape.isAscending() ? ASCENDING_SEAT_HEIGHT : 0.8D;
@@ -1946,9 +1954,9 @@ public final class MinecartFloatingHelper {
     private static final Map<AbstractMinecart, RenderYawFilter> RENDER_YAW_FILTERS = new WeakHashMap<>();
 
     /**
-     * Limits how fast the drawn yaw can change. The pose source flips between vanilla and ours around curves and
-     * slope ends, and each source can disagree by tens of degrees for a tick, which shows up as the cart snapping
-     * round. Following the wanted yaw at a bounded rate turns those snaps into a short smooth turn.
+     * Limits how fast the drawn yaw can change. The pose source flips between vanilla and ours around curves and slope
+     * ends, and each source can disagree by tens of degrees for a tick, which shows up as the cart snapping round.
+     * Following the wanted yaw at a bounded rate turns those snaps into a short smooth turn.
      * <p>
      * The cart looks the same from both ends, so a pose can also be drawn as yaw + 180 with the pitch negated. The
      * filter takes whichever of the two is closer to what is on screen, and {@link #pitchSign()} says which it took.
@@ -1959,6 +1967,32 @@ public final class MinecartFloatingHelper {
         private float time;
         private boolean set;
         private float pitchSign = 1.0F;
+        /**
+         * True from the moment the float pose was drawn until the vanilla pose has been caught up with.
+         */
+        private boolean easing;
+
+        /**
+         * A cart that is just riding rails with the vanilla pose is drawn exactly like vanilla draws it, however fast
+         * that turns. The bounded rate only applies to the float pose and to the hand-over from it to the vanilla pose
+         * (landing on a perpendicular rail), until the drawn yaw has caught up with the vanilla one.
+         */
+        public float apply(float wanted, float time, boolean floatPose) {
+            if (!floatPose && !easing) {
+                return reset(wanted, time);
+            }
+            float drawn = apply(wanted, time);
+            if (floatPose) {
+                easing = true;
+                return drawn;
+            }
+            if (Math.min(
+                    Math.abs(Mth.wrapDegrees(wanted - drawn)),
+                    Math.abs(Mth.wrapDegrees(wanted + 180.0F - drawn))) < 1.0F) {
+                return reset(wanted, time);
+            }
+            return drawn;
+        }
 
         public float apply(float wanted, float time) {
             if (!set || time < this.time - 0.001F || time - this.time > 2.0F) {
@@ -1992,6 +2026,7 @@ public final class MinecartFloatingHelper {
             yaw = wanted;
             this.time = time;
             set = true;
+            easing = false;
             pitchSign = 1.0F;
             return yaw;
         }
@@ -2000,9 +2035,9 @@ public final class MinecartFloatingHelper {
     /**
      * Client only. How much of the full slope tilt vanilla would draw at this spot, 0 for flat to 1 for a full slope,
      * or null when no rail is there. Vanilla looks 0.3 ahead and behind on the rail, so it eases into and out of a
-     * slope over about half a block. The float pose is either flat or a full 45 degrees, so it was drawn up to
-     * a few ticks late at the end of a slope. The client cart also trails the rail height a little while it
-     * catches up, so the lookup is retried a bit higher when nothing is found.
+     * slope over about half a block. The float pose is either flat or a full 45 degrees, so it was drawn up to a few
+     * ticks late at the end of a slope. The client cart also trails the rail height a little while it catches up, so
+     * the lookup is retried a bit higher when nothing is found.
      */
     @Nullable
     public static Float railSlopeScale(AbstractMinecart cart, double x, double y, double z) {
@@ -2045,6 +2080,15 @@ public final class MinecartFloatingHelper {
     }
 
     /**
+     * Render yaw in degrees the smoothing filter last drew for this client cart, or NaN when there is none. Only the
+     * rotation debug log reads this.
+     */
+    public static float renderYawFilterValue(AbstractMinecart cart) {
+        RenderYawFilter filter = RENDER_YAW_FILTERS.get(cart);
+        return filter == null || !filter.set ? Float.NaN : filter.yaw;
+    }
+
+    /**
      * -1 while the smoothed yaw is drawn the other way round (see {@link RenderYawFilter}), so the pitch has to flip.
      */
     public static float smoothRenderPitchSign(AbstractMinecart cart) {
@@ -2058,13 +2102,13 @@ public final class MinecartFloatingHelper {
     /**
      * Render yaw in degrees as given to the renderer (180 minus the atan2 yaw), smoothed per cart.
      */
-    public static float smoothRenderYawDegrees(AbstractMinecart cart, float wantedDegrees, float partialTicks) {
+    public static float smoothRenderYawDegrees(AbstractMinecart cart, float wantedDegrees, float partialTicks, boolean floatPose) {
         if (!cart.level().isClientSide() || !isFloating(cart)) {
             RENDER_YAW_FILTERS.remove(cart);
             return wantedDegrees;
         }
         return RENDER_YAW_FILTERS.computeIfAbsent(cart, c -> new RenderYawFilter())
-                .apply(wantedDegrees, cart.tickCount + partialTicks);
+                .apply(wantedDegrees, cart.tickCount + partialTicks, floatPose);
     }
 
     /**
@@ -2383,21 +2427,45 @@ public final class MinecartFloatingHelper {
     }
 
     /**
-     * Pressed against solid with no rail to seat on. Skipped while a landing/stair is still ahead.
+     * Pressed against solid with no rail to seat on: a floor, a ceiling, or (while climbing or diving) a wall. Skipped
+     * while a landing/stair is still ahead.
+     *
+     * @param intended the motion the cart tried to make this tick. A wall zeroes the motion that is left on the cart
+     *                 after the move, so only this tells whether the cart was going anywhere.
      */
-    public static boolean shouldLevelAgainstSolidBarrier(AbstractMinecart cart, boolean onGround, boolean verticalCollision) {
+    public static boolean shouldLevelAgainstSolidBarrier(AbstractMinecart cart, boolean onGround, boolean verticalCollision,
+                                                         boolean horizontalCollision, Vec3 intended) {
         if (!isFloating(cart)) {
             return false;
         }
-        if (!onGround && !verticalCollision) {
+        // A level cart that meets a wall just stops, it has no slope to flatten.
+        boolean wall = horizontalCollision && getIncline(cart) != 0;
+        if (!onGround && !verticalCollision && !wall) {
             return false;
         }
         // A cart that has stopped has nothing to flatten out of.
-        if (cart.getDeltaMovement().horizontalDistanceSqr() < MOTION_EPSILON * MOTION_EPSILON) {
+        Vec3 moving = wall ? intended : cart.getDeltaMovement();
+        if (moving.horizontalDistanceSqr() < MOTION_EPSILON * MOTION_EPSILON) {
             return false;
+        }
+        // A wall in the way ends the slope even when the cart is on a slope rail that runs into it.
+        if (wall && isWallAhead(cart, moving)) {
+            return true;
         }
         if (findRailPos(cart) != null) {
             return false;
+        }
+        // Touching something sideways that is not a wall in the way (a grazed edge, a stair tread) is no reason to level.
+        if (!onGround && !verticalCollision) {
+            return false;
+        }
+        // A cart diving off the end of a slope clips the support block under the slope's low end with the edge of its
+        // hitbox. That is not the ground: only a floor under the middle of the cart ends the dive.
+        if (getIncline(cart) < 0) {
+            BlockPos under = BlockPos.containing(cart.getX(), cart.getY() - 0.05D, cart.getZ());
+            if (cart.level().getBlockState(under).getCollisionShape(cart.level(), under).isEmpty()) {
+                return false;
+            }
         }
         // Still climbing into a real landing, don't level out.
         // Do not key off climb-memory alone: remembered ascending shape after the rails end
@@ -2409,6 +2477,38 @@ public final class MinecartFloatingHelper {
         return !hasContinuingRailAhead(cart) && !hasContinuingSlopeSolidAhead(cart);
     }
 
+    /**
+     * Solid in front of the cart at its own height that it cannot get over or past.
+     * <ul>
+     *     <li>Two blocks high or more: always a wall. Rails or stairs seen beyond it are no way forward.</li>
+     *     <li>One block high: may be the tread of a stair path, so a stair or a rail still leading on (or a landing
+     *     the climb is heading for) means it is not a wall. A diving cart cannot step up a tread, so for it the stair
+     *     path is the only exception.</li>
+     * </ul>
+     */
+    private static boolean isWallAhead(AbstractMinecart cart, Vec3 moving) {
+        double reach = cart.getBbWidth() / 2.0D + 0.1D;
+        double dx = 0.0D;
+        double dz = 0.0D;
+        if (Math.abs(moving.x) >= Math.abs(moving.z)) {
+            dx = Math.signum(moving.x) * reach;
+        } else {
+            dz = Math.signum(moving.z) * reach;
+        }
+        BlockPos ahead = BlockPos.containing(cart.getX() + dx, cart.getY() + cart.getBbHeight() / 2.0D, cart.getZ() + dz);
+        if (!isBlockingSolid(cart.level(), ahead)) {
+            return false;
+        }
+        if (isBlockingSolid(cart.level(), ahead.above())) {
+            return true;
+        }
+        if (hasContinuingSlopeSolidAhead(cart)) {
+            return false;
+        }
+        return getIncline(cart) < 0
+                || (!hasContinuingRailAhead(cart) && !isBelowContinuingFlatLanding(cart));
+    }
+
     private static boolean isCornerRail(RailShape shape) {
         return shape == RailShape.NORTH_EAST
                 || shape == RailShape.NORTH_WEST
@@ -2416,9 +2516,45 @@ public final class MinecartFloatingHelper {
                 || shape == RailShape.SOUTH_WEST;
     }
 
+    /**
+     * A slope rail one block under a cart that is flying level, with nothing connecting it to the cart's own height.
+     * The ascending seat spans the whole block, so such a rail used to look like the cart was sitting on it: the cart
+     * then climbed, descended or turned along a track it never touched. Carts that are already on a slope (incline
+     * set), diving onto the rail, or connected to it at its high end by a rail at their own level are real rail traffic
+     * and don't count.
+     */
+    private static final double GHOST_SLOPE_MIN_HEIGHT = 0.9D;
+
+    public static boolean isGhostSlopeBelow(AbstractMinecart cart, BlockPos railPos, BlockState railState) {
+        if (!isFloating(cart) || getIncline(cart) != 0) {
+            return false;
+        }
+        if (!(railState.getBlock() instanceof BaseRailBlock rail)) {
+            return false;
+        }
+        RailShape shape = railState.getValue(rail.getShapeProperty());
+        // Compare heights, not blocks: a cart flying exactly one block up can floor into the rail's own cell.
+        if (!shape.isAscending() || cart.getY() - railPos.getY() < GHOST_SLOPE_MIN_HEIGHT) {
+            return false;
+        }
+        if (cart.getDeltaMovement().y < -0.05D) {
+            return false;
+        }
+        Direction high = switch (shape) {
+            case ASCENDING_EAST -> Direction.EAST;
+            case ASCENDING_WEST -> Direction.WEST;
+            case ASCENDING_NORTH -> Direction.NORTH;
+            default -> Direction.SOUTH;
+        };
+        return !BaseRailBlock.isRail(cart.level().getBlockState(railPos.relative(high).above()));
+    }
+
     public static boolean isSettledOnRail(AbstractMinecart cart, BlockPos railPos) {
         BlockState railState = cart.level().getBlockState(railPos);
         if (!(railState.getBlock() instanceof BaseRailBlock rail)) {
+            return false;
+        }
+        if (isGhostSlopeBelow(cart, railPos, railState)) {
             return false;
         }
         double height = cart.getY() - railPos.getY();
@@ -2445,7 +2581,7 @@ public final class MinecartFloatingHelper {
         BlockPos pos = cart.blockPosition();
         boolean climbFloat = isFloating(cart) && getIncline(cart) > 0;
         BlockState at = cart.level().getBlockState(pos);
-        if (BaseRailBlock.isRail(at)) {
+        if (BaseRailBlock.isRail(at) && !isGhostSlopeBelow(cart, pos, at)) {
             // High above a through-flat with a higher target, ignore it. Otherwise it's the landing.
             if (!(climbFloat && isFlatStraightRail(at) && cart.getY() - pos.getY() > 0.45D
                     && hasHigherClimbTarget(cart, pos))) {
@@ -2454,7 +2590,7 @@ public final class MinecartFloatingHelper {
         }
         BlockPos below = pos.below();
         BlockState belowState = cart.level().getBlockState(below);
-        if (BaseRailBlock.isRail(belowState)) {
+        if (BaseRailBlock.isRail(belowState) && !isGhostSlopeBelow(cart, below, belowState)) {
             // Ignore rails far below so a floor track can't kill climb Y.
             // Ascending underfoot is different: seat Y spans ~0..1 in the same cell.
             if (climbFloat) {
@@ -2525,6 +2661,9 @@ public final class MinecartFloatingHelper {
     public static boolean isMidairAboveRail(AbstractMinecart cart, BlockPos railPos, boolean alreadyLeftRails) {
         if (!isFloating(cart)) {
             return false;
+        }
+        if (isGhostSlopeBelow(cart, railPos, cart.level().getBlockState(railPos))) {
+            return true;
         }
         double height = cart.getY() - railPos.getY();
         // Still under the rail.
@@ -2687,7 +2826,8 @@ public final class MinecartFloatingHelper {
      * us out.
      */
     public static boolean shouldKeepOpenAirDescent(AbstractMinecart cart) {
-        return getIncline(cart) < 0 && hasOpenAirSlopeTarget(cart);
+        return getIncline(cart) < 0
+                && (hasOpenAirSlopeTarget(cart) || ((MinecartFloatPoseAccess) cart).paradiseLost$getOpenAirClimbGrace() > 0);
     }
 
     /**
@@ -3031,7 +3171,7 @@ public final class MinecartFloatingHelper {
     }
 
     public static void debugTick(AbstractMinecart cart, boolean wasOffRail, boolean midair, String phase) {
-        if (!DEBUG_LOG || !isFloating(cart)) {
+        if (!DebugFlags.MINECART_FLOAT || !isFloating(cart)) {
             return;
         }
         BlockPos pos = cart.blockPosition();
@@ -3071,7 +3211,7 @@ public final class MinecartFloatingHelper {
     }
 
     private static void debug(AbstractMinecart cart, String event, String detail) {
-        if (!DEBUG_LOG) {
+        if (!DebugFlags.MINECART_FLOAT) {
             return;
         }
         ModConstants.LOGGER.info("{} {} id={} {}", DEBUG_PREFIX, event, cart.getId(), detail);
