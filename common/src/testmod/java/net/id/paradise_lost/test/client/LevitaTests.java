@@ -2118,6 +2118,237 @@ public final class LevitaTests {
         return client().level.getEntity(id) instanceof AbstractMinecart cart && MinecartFloatingHelper.isFloating(cart);
     }
 
+    // ---- issues #951 to #954, as seen by the client ----
+
+    private static void lookFrom(ServerPlayer player, ServerLevel level, Vec3 eye, Vec3 target) {
+        Vec3 delta = target.subtract(eye);
+        float yaw = (float) (Mth.atan2(-delta.x, delta.z) * (180.0 / Math.PI));
+        float pitch = (float) (Mth.atan2(-delta.y, Math.sqrt(delta.x * delta.x + delta.z * delta.z)) * (180.0 / Math.PI));
+        player.setGameMode(GameType.SPECTATOR);
+        teleport(player, level, eye.x, eye.y, eye.z, yaw, pitch);
+    }
+
+    private static final String[] G953_LANES = {"parallel flat rail", "crossing flat rail", "rail rising ahead", "rail falling ahead", "curve"};
+    private static final int[] g953Ids = new int[G953_LANES.length];
+    private static final boolean[] g953Failed = new boolean[G953_LANES.length];
+    private static final List<String> g953Wrong = new ArrayList<>();
+
+    private static RailShape g953Shape(int lane) {
+        boolean x = dir.getAxis() == Direction.Axis.X;
+        return switch (lane) {
+            case 0 -> x ? RailShape.EAST_WEST : RailShape.NORTH_SOUTH;
+            case 1 -> x ? RailShape.NORTH_SOUTH : RailShape.EAST_WEST;
+            case 2 -> ascending(dir);
+            case 3 -> ascending(dir.getOpposite());
+            default -> RailShape.SOUTH_EAST;
+        };
+    }
+
+    /**
+     * #953: the client has to draw a floating cart flying level and straight over rails that lie one block below it,
+     * whatever their shape. Slopes used to pull it into a tilt, curves into a turn.
+     */
+    @ClientTest("client draws a floating cart level and straight over rails below it (#953)")
+    private static List<Step> clientIgnoresRailsBelow() {
+        return List.of(
+                setup(world -> {
+                    g953Wrong.clear();
+                    Arrays.fill(g953Failed, false);
+                    for (int lane = 0; lane < G953_LANES.length; lane++) {
+                        BlockPos lane0 = start.relative(dir.getClockWise(), 3 * lane);
+                        fill(world, lane0, lane0.relative(dir, 3), Blocks.STONE.defaultBlockState());
+                        track(world, lane0.above(), "rLrr");
+                        for (int i = 6; i <= 9; i++) {
+                            world.setBlockAndUpdate(lane0.relative(dir, i), Blocks.RAIL.defaultBlockState());
+                        }
+                        for (int i = 6; i <= 9; i++) {
+                            forceShape(world, lane0.relative(dir, i), g953Shape(lane));
+                        }
+                        g953Ids[lane] = launch(world, EntityType.MINECART, lane0.above(), 0.4);
+                    }
+                }),
+                Step.run(0, () -> onServer(server -> lookFrom(player(server), world(server),
+                        Vec3.atBottomCenterOf(start).relative(dir, 8).relative(dir.getCounterClockWise(), 12).add(0, 3, 0),
+                        Vec3.atBottomCenterOf(start).relative(dir, 8).relative(dir.getClockWise(), 6).add(0, 1, 0)))),
+                Step.until("client to know all the carts", 40, () -> {
+                    for (int id : g953Ids) {
+                        if (client().level.getEntity(id) == null) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }),
+                Step.until("client carts to fly over the rails", 160, () -> {
+                    boolean done = true;
+                    for (int lane = 0; lane < G953_LANES.length; lane++) {
+                        AbstractMinecart cart = clientCart(g953Ids[lane]);
+                        double a = along(cart);
+                        done &= a > 12.5;
+                        if (a < 5 || a > 12.5 || g953Failed[lane]) {
+                            continue;
+                        }
+                        float[] pose = clientRenderPose(cart);
+                        float yaw = Mth.wrapDegrees(pose[0]);
+                        boolean x = dir.getAxis() == Direction.Axis.X;
+                        boolean yawOk = x
+                                ? (Math.abs(yaw) <= 8.0F || Math.abs(Math.abs(yaw) - 180.0F) <= 8.0F)
+                                : Math.abs(Math.abs(yaw) - 90.0F) <= 8.0F;
+                        String problem = null;
+                        if (!MinecartFloatingHelper.isFloating(cart)) {
+                            problem = "cart stopped floating";
+                        } else if (Math.abs(cart.getY() - (start.getY() + 1)) > 0.15) {
+                            problem = "cart left its flight level";
+                        } else if (Math.abs(side(cart) - 3 * lane) > 0.25) {
+                            problem = "cart swerved";
+                        } else if (Math.abs(pose[1]) > 3.0F) {
+                            problem = "cart drawn with pitch " + fmt(pose[1]);
+                        } else if (!yawOk) {
+                            problem = "cart drawn with yaw " + fmt(yaw);
+                        }
+                        if (problem != null) {
+                            g953Failed[lane] = true;
+                            g953Wrong.add(G953_LANES[lane] + ": " + problem + describe(cart) + floatState(cart));
+                        }
+                    }
+                    return done;
+                }),
+                Step.run(0, () -> checkAll(g953Wrong))
+        );
+    }
+
+    /**
+     * #952: the client has to draw the cart diving past the last slope of a downward run, with no rail to land on.
+     */
+    @ClientTest("client draws a cart keep diving after downward levita slopes with no rail beyond them (#952)")
+    private static List<Step> clientDescendsWithoutRailAhead() {
+        int slopes = 3;
+        int height = 8;
+        return List.of(
+                setup(world -> {
+                    BlockPos base = start.above(height);
+                    for (int i = 0; i < slopes; i++) {
+                        placePoweredLevitaRail(world, base.relative(dir, i).above(i));
+                    }
+                    BlockPos top = base.relative(dir, slopes).above(slopes);
+                    fill(world, top.below(), top.relative(dir, 3).below(), Blocks.STONE.defaultBlockState());
+                    track(world, top, "LLL");
+                    for (int i = 0; i < slopes; i++) {
+                        slope(world, base.relative(dir, i).above(i));
+                    }
+                    entityId = launch(world, EntityType.MINECART, top.relative(dir, 2), -0.4);
+                    ticks = 0;
+                }, true),
+                Step.run(0, () -> onServer(server -> standAside(player(server), world(server), 12, 6))),
+                Step.until("client to know the cart", 40, () -> client().level.getEntity(entityId) != null),
+                Step.until("client cart to pass the last slope", 150, () -> {
+                    watchClientRender();
+                    return along(clientCart(entityId)) < -0.6;
+                }),
+                Step.until("client cart to keep diving", 40, () -> {
+                    watchClientRender();
+                    AbstractMinecart cart = clientCart(entityId);
+                    check(cart.getY() > start.getY() - 0.5, "client cart hit the ground" + describe(cart) + floatState(cart));
+                    return cart.getY() < start.getY() + height - 4;
+                }),
+                Step.run(0, () -> check(renderViolations.isEmpty(), "client render of the dive was wrong (" + renderViolations.size() + " samples): "
+                        + String.join(" | ", renderViolations.subList(0, Math.min(8, renderViolations.size())))))
+        );
+    }
+
+    /**
+     * #951: with five charges the client has to see the cart climb far past what a single charge reaches.
+     */
+    @ClientTest("client sees the climb after a launch slope grow with the number of rails passed (#951)")
+    private static List<Step> clientLaunchDistanceGrows() {
+        int rails = 4;
+        return List.of(
+                setup(world -> {
+                    fill(world, start.relative(dir, -2).below(), start.relative(dir, rails + 1).below(), Blocks.STONE.defaultBlockState());
+                    track(world, start.relative(dir, -2), "rr" + "L".repeat(rails) + "L");
+                    world.setBlockAndUpdate(start.relative(dir, rails + 1), Blocks.STONE.defaultBlockState());
+                    slope(world, start.relative(dir, rails));
+                    entityId = launch(world, EntityType.MINECART, start.relative(dir, -2), 0.4);
+                    startY = start.getY();
+                    seen = startY;
+                    ticks = 0;
+                }, true),
+                Step.run(0, () -> onServer(server -> standAside(player(server), world(server), 14, 8))),
+                Step.until("client to know the cart", 40, () -> client().level.getEntity(entityId) != null),
+                Step.until("150 ticks of flight", 160, () -> {
+                    watchClientRender();
+                    seen = Math.max(seen, clientCart(entityId).getY());
+                    return ++ticks >= 150;
+                }),
+                Step.run(0, () -> {
+                    check(seen - startY > 38, "client cart rose only " + fmt(seen - startY) + " blocks, one charge alone reaches about 33");
+                    check(renderViolations.isEmpty(), "client render of the climb was wrong (" + renderViolations.size() + " samples): "
+                            + String.join(" | ", renderViolations.subList(0, Math.min(8, renderViolations.size()))));
+                })
+        );
+    }
+
+    /**
+     * #954: a triggered rail gives a cart standing on it nothing until it resets, and the client sees both.
+     */
+    @ClientTest("client sees a triggered levita rail stay off until its delay is over (#954)")
+    private static List<Step> clientTriggeredRailStaysOff() {
+        return List.of(
+                setup(world -> {
+                    track(world, start, "rrLrrr");
+                    pos = start.relative(dir, 2);
+                    entityId = launch(world, EntityType.MINECART, start, 0.4);
+                    ticks = 0;
+                }),
+                Step.run(0, () -> onServer(server -> standAside(player(server), world(server), 6, 3))),
+                Step.until("client to see the rail and the cart", 40, () -> client().level.getEntity(entityId) != null
+                        && client().level.getBlockState(pos).getBlock() instanceof LevitaRailBlock),
+                Step.until("rail to be triggered on the client", 40, () -> client().level.getBlockState(pos).getValue(LevitaRailBlock.TRIGGERED)),
+                Step.until("first cart to fly on", 40, () -> along(clientCart(entityId)) > 5),
+                Step.run(0, () -> onServer(server -> shotSecondId = launch(world(server), EntityType.MINECART, pos, 0))),
+                Step.until("client to know the second cart", 20, () -> client().level.getEntity(shotSecondId) != null),
+                Step.until("20 ticks on the triggered rail", 30, () -> {
+                    check(client().level.getBlockState(pos).getValue(LevitaRailBlock.TRIGGERED), "setup: the rail was reset too early");
+                    check(!clientFloating(shotSecondId), "the client sees a triggered rail charge a cart that stands on it" + floatState(clientCart(shotSecondId)));
+                    return ++ticks >= 20;
+                }),
+                Step.until("cart to float again once the rail has reset", 100, () -> clientFloating(shotSecondId))
+        );
+    }
+
+    private static int shotSecondId;
+
+    /**
+     * A floating cart that only rides rails is drawn the way vanilla draws it, however fast its yaw changes. The
+     * bounded turn rate belongs to the float pose and to the hand-over from it, e.g. landing on a perpendicular rail.
+     */
+    @ClientTest("floating cart riding rails is drawn with the vanilla yaw, the float pose eases into it")
+    private static List<Step> ridingUsesVanillaYaw() {
+        return List.of(Step.run(0, () -> {
+            MinecartFloatingHelper.RenderYawFilter riding = new MinecartFloatingHelper.RenderYawFilter();
+            float time = 1;
+            float[] curve = {0, 30, 80, 150, 180, -90, 0};
+            for (float yaw : curve) {
+                float drawn = riding.apply(yaw, time++, false);
+                check(drawn == yaw, "a cart riding with the vanilla pose was drawn at yaw " + fmt(drawn) + ", vanilla wants " + fmt(yaw));
+            }
+
+            MinecartFloatingHelper.RenderYawFilter landing = new MinecartFloatingHelper.RenderYawFilter();
+            landing.apply(0, time++, true);
+            float flying = landing.apply(90, time++, true);
+            check(flying > 0 && flying < 90, "the float pose turned to " + fmt(flying) + " at once instead of easing");
+            float drawn = flying;
+            int ticks = 0;
+            while (Math.abs(Mth.wrapDegrees(90 - drawn)) > 1.0F && ticks++ < 10) {
+                drawn = landing.apply(90, time++, false);
+                check(Math.abs(Mth.wrapDegrees(90 - drawn)) <= 90, "bad yaw " + fmt(drawn));
+            }
+            check(Math.abs(Mth.wrapDegrees(90 - drawn)) <= 1.0F, "the hand-over from the float pose never reached the vanilla yaw, stuck at " + fmt(drawn));
+            check(ticks >= 1, "the hand-over from the float pose to the vanilla yaw was instant");
+            float after = landing.apply(-90, time++, false);
+            check(after == -90, "once caught up the cart still did not follow vanilla, drawn at " + fmt(after));
+        }));
+    }
+
     private static Entity levitaArrow() {
         List<LevitaArrow> arrows = client().level.getEntitiesOfClass(LevitaArrow.class, client().player.getBoundingBox().inflate(40), e -> true);
         return arrows.isEmpty() ? null : arrows.getFirst();

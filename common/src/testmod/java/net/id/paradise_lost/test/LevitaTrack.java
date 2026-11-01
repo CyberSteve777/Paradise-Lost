@@ -68,6 +68,25 @@ public final class LevitaTrack {
         check(now.is(old.getBlock()) && now.getValue(property) == shape, "setup: slope at " + at.toShortString() + " is " + now);
     }
 
+    public static void forceShape(ServerLevel world, BlockPos at, RailShape shape) {
+        BlockState old = world.getBlockState(at);
+        check(old.getBlock() instanceof BaseRailBlock, "setup: no rail at " + at.toShortString() + ", found " + old);
+        Property<RailShape> property = ((BaseRailBlock) old.getBlock()).getShapeProperty();
+        world.setBlock(at, old.setValue(property, shape), Block.UPDATE_CLIENTS);
+
+        BlockState now = world.getBlockState(at);
+        check(now.is(old.getBlock()) && now.getValue(property) == shape, "setup: rail at " + at.toShortString() + " is " + now);
+    }
+
+    public static RailShape ascending(Direction toward) {
+        return switch (toward) {
+            case NORTH -> RailShape.ASCENDING_NORTH;
+            case SOUTH -> RailShape.ASCENDING_SOUTH;
+            case EAST -> RailShape.ASCENDING_EAST;
+            default -> RailShape.ASCENDING_WEST;
+        };
+    }
+
     public static void singleSlope(ServerLevel world, boolean down) {
         world.setBlockAndUpdate(start.relative(dir), Blocks.STONE.defaultBlockState());
         track(world, start, "L");
