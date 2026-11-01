@@ -16,12 +16,14 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.BooleanProperty;
 import net.minecraft.world.level.block.state.properties.RailShape;
 import net.minecraft.world.phys.AABB;
-import java.util.List;
-import java.util.function.Predicate;
 
 public class LevitaRailBlock extends PoweredRailBlock {
 
     public static final BooleanProperty TRIGGERED = BlockStateProperties.TRIGGERED;
+
+    private static final int TRIGGER_DELAY_TICKS = 80;
+
+    private static final double DETECTION_INSET = 0.4D;
 
     public LevitaRailBlock(BlockBehaviour.Properties settings) {
         super(settings);
@@ -36,46 +38,57 @@ public class LevitaRailBlock extends PoweredRailBlock {
 
     @Override
     protected void entityInside(BlockState state, Level world, BlockPos pos, Entity entity) {
-        if (!world.isClientSide) {
-            List<AbstractMinecart> list = this.getCarts(world, pos, AbstractMinecart.class, e -> true);
-            for (AbstractMinecart cart : list) {
-                MinecartFloatingHelper.updateInclineFromRail(cart, state.getValue(SHAPE), cart.getDeltaMovement());
-                if (state.getValue(POWERED)) {
-                    // TRIGGERED is a visual/lock that prevents per-tick re-charge of a cart already
-                    // floating on this rail. A follow-up cart with no float time still gets a charge.
-                    if (!state.getValue(TRIGGERED)) {
-                        MinecartFloatingHelper.addFloating(cart);
-                        world.setBlock(pos, state.setValue(TRIGGERED, true), 3);
-                        world.scheduleTick(pos, this, 80);
-                        state = state.setValue(TRIGGERED, true);
-                    } else if (MinecartFloatingHelper.getFloatTime(cart) <= 0) {
-                        MinecartFloatingHelper.addFloating(cart);
-                    }
-                } else {
-                    MinecartFloatingHelper.stopFloating(cart);
-                }
-            }
+        if (!world.isClientSide && entity instanceof AbstractMinecart cart && isOnRail(cart, pos)) {
+            apply(state, world, pos, cart);
         }
     }
 
+    private void apply(BlockState state, Level world, BlockPos pos, AbstractMinecart cart) {
+        MinecartFloatingHelper.updateInclineFromRail(cart, state.getValue(SHAPE), cart.getDeltaMovement());
+        if (!state.getValue(POWERED)) {
+            MinecartFloatingHelper.stopFloating(cart);
+        } else if (!state.getValue(TRIGGERED)) {
+            // TRIGGERED is the rail's off state: it gives one charge, then does nothing at all for 80 ticks,
+            // no matter which cart is on it or how much float that cart has left.
+            MinecartFloatingHelper.addFloating(cart);
+            world.setBlock(pos, state.setValue(TRIGGERED, true), Block.UPDATE_ALL);
+            world.scheduleTick(pos, this, TRIGGER_DELAY_TICKS);
+        }
+    }
+
+    @Override
     protected void tick(BlockState state, ServerLevel world, BlockPos pos, RandomSource random) {
-        world.setBlock(pos, state.setValue(TRIGGERED, false), 3);
+        if (!state.getValue(TRIGGERED)) {
+            return;
+        }
+        BlockState reset = state.setValue(TRIGGERED, false);
+        world.setBlock(pos, reset, Block.UPDATE_ALL);
+        if (!reset.getValue(POWERED)) {
+            return;
+        }
+        for (AbstractMinecart cart : world.getEntitiesOfClass(AbstractMinecart.class, detectionBox(pos))) {
+            apply(world.getBlockState(pos), world, pos, cart);
+        }
     }
 
-    private <T extends AbstractMinecart> List<T> getCarts(Level world, BlockPos pos, Class<T> entityClass, Predicate<Entity> entityPredicate) {
-        return world.getEntitiesOfClass(entityClass, this.getCartDetectionBox(pos), entityPredicate);
-    }
-
-    private AABB getCartDetectionBox(BlockPos pos) {
-        double radius = 0.4;
-        return new AABB(
-                pos.getX() + radius,
+    private static boolean isOnRail(AbstractMinecart cart, BlockPos pos) {
+        return cart.getBoundingBox().intersects(
+                pos.getX() + DETECTION_INSET,
                 pos.getY(),
-                pos.getZ() + radius,
-                pos.getX() + 1 - radius,
-                pos.getY() + 1 - radius,
-                pos.getZ() + 1 - radius
-        );
+                pos.getZ() + DETECTION_INSET,
+                pos.getX() + 1 - DETECTION_INSET,
+                pos.getY() + 1 - DETECTION_INSET,
+                pos.getZ() + 1 - DETECTION_INSET);
+    }
+
+    private static AABB detectionBox(BlockPos pos) {
+        return new AABB(
+                pos.getX() + DETECTION_INSET,
+                pos.getY(),
+                pos.getZ() + DETECTION_INSET,
+                pos.getX() + 1 - DETECTION_INSET,
+                pos.getY() + 1 - DETECTION_INSET,
+                pos.getZ() + 1 - DETECTION_INSET);
     }
 
     @Override
