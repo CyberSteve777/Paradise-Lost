@@ -7,7 +7,7 @@ import net.id.paradise_lost.world.feature.structure.processor.SupportCheckerProc
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureProcessorType;
 
-public class StructureProcessorsRegistry {
+public final class StructureProcessorsRegistry {
     private static final RegistrationProvider<StructureProcessorType<?>> STRUCTURE_PROCESSOR_REGISTRATION_PROVIDER =
             RegistrationProvider.get(BuiltInRegistries.STRUCTURE_PROCESSOR, ModConstants.MOD_ID);
 
